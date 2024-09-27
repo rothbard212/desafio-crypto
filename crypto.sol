@@ -1,34 +1,60 @@
-// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.4.24;
 
-pragma solidity ^0.8.0;
+// Safe Math Interface
+contract SafeMath {
+    function safeAdd(uint a, uint b) public pure returns (uint c) {
+        c = a + b;
+        require(c >= a);
+    }
 
-interface IERC20 {
-    function totalSupply() external view returns(uint256);
-    function balanceOf(address account) external view returns(uint256);
-    function allowance(address owner, address spender) external view returns(uint256);
-    function transfer(address recipient, uint256 amount) external returns(bool);
-    function approve(address spender, uint256 amount) external returns(bool);
-    function transferFrom(address spender, address recipient, uint256 amount) external returns(bool);
+    function safeSub(uint a, uint b) public pure returns (uint c) {
+        require(b <= a);
+        c = a - b;
+    }
 
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
-    event Mint(address indexed to, uint256 value);
-    event Burn(address indexed from, uint256 value);
-    event Paused(address account);
-    event Unpaused(address account);
+    function safeMul(uint a, uint b) public pure returns (uint c) {
+        c = a * b;
+        require(a == 0 || c / a == b);
+    }
+
+    function safeDiv(uint a, uint b) public pure returns (uint c) {
+        require(b > 0);
+        c = a / b;
+    }
 }
 
-contract ProjectCoin is IERC20 {
-    string public constant name = "Project Coin";
-    string public constant symbol = "Project";
-    uint8 public constant decimals = 18;
+// ERC Token Standard #20 Interface
+contract ERC20Interface {
+    function totalSupply() public constant returns (uint);
+    function balanceOf(address tokenOwner) public constant returns (uint balance);
+    function allowance(address tokenOwner, address spender) public constant returns (uint remaining);
+    function transfer(address to, uint tokens) public returns (bool success);
+    function approve(address spender, uint tokens) public returns (bool success);
+    function transferFrom(address from, address to, uint tokens) public returns (bool success);
 
-    mapping(address => uint256) private balances;
-    mapping(address => mapping(address => uint256)) private allowed;
-    uint256 private totalSupply_;
+    event Transfer(address indexed from, address indexed to, uint tokens);
+    event Approval(address indexed tokenOwner, address indexed spender, uint tokens);
+}
+
+// Contract function to receive approval and execute function in one call
+contract ApproveAndCallFallBack {
+    function receiveApproval(address from, uint256 tokens, address token, bytes data) public;
+}
+
+// Actual token contract with additional features
+contract DIOToken is ERC20Interface, SafeMath {
+    string public symbol;
+    string public  name;
+    uint8 public decimals;
+    uint public _totalSupply;
     
     address public owner;
-    bool private paused;
+    bool public paused;
+    uint public transactionFeePercent;
+    
+    mapping(address => uint) balances;
+    mapping(address => mapping(address => uint)) allowed;
+    mapping(address => bool) public blacklisted;
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Caller is not the owner");
@@ -40,76 +66,113 @@ contract ProjectCoin is IERC20 {
         _;
     }
 
-    constructor() {
+    modifier notBlacklisted(address account) {
+        require(!blacklisted[account], "Address is blacklisted");
+        _;
+    }
+
+    constructor() public {
+        symbol = "DIO";
+        name = "DIO Coin";
+        decimals = 2;
+        _totalSupply = 100000;
         owner = msg.sender;
-        totalSupply_ = 10 ether;
-        balances[msg.sender] = totalSupply_;
+        balances[owner] = _totalSupply;
+        transactionFeePercent = 1; // 1% transaction fee
+        emit Transfer(address(0), owner, _totalSupply);
     }
 
-    // Implementação correta da função totalSupply()
-    function totalSupply() public override view returns(uint256) {
-        return totalSupply_;
+    function totalSupply() public constant returns (uint) {
+        return _totalSupply - balances[address(0)];
     }
 
-    function balanceOf(address tokenOwner) public override view returns(uint256) {
+    function balanceOf(address tokenOwner) public constant returns (uint balance) {
         return balances[tokenOwner];
     }
 
-    function transfer(address receiver, uint256 numTokens) public override whenNotPaused returns(bool) {
-        require(numTokens <= balances[msg.sender], "Balance not sufficient");
-        balances[msg.sender] -= numTokens;
-        balances[receiver] += numTokens;
-        emit Transfer(msg.sender, receiver, numTokens);
+    function transfer(address to, uint tokens) public whenNotPaused notBlacklisted(msg.sender) returns (bool success) {
+        uint fee = safeDiv(safeMul(tokens, transactionFeePercent), 100);
+        uint tokensToTransfer = safeSub(tokens, fee);
+
+        balances[msg.sender] = safeSub(balances[msg.sender], tokens);
+        balances[to] = safeAdd(balances[to], tokensToTransfer);
+        balances[owner] = safeAdd(balances[owner], fee); // Collect the fee for the owner
+        
+        emit Transfer(msg.sender, to, tokensToTransfer);
         return true;
     }
 
-    function approve(address delegate, uint256 numTokens) public override returns (bool) {
-        allowed[msg.sender][delegate] = numTokens;
-        emit Approval(msg.sender, delegate, numTokens);
+    function approve(address spender, uint tokens) public returns (bool success) {
+        allowed[msg.sender][spender] = tokens;
+        emit Approval(msg.sender, spender, tokens);
         return true;
     }
 
-    function allowance(address owner, address delegate) public override view returns(uint256) {
-        return allowed[owner][delegate];
-    }
+    function transferFrom(address from, address to, uint tokens) public whenNotPaused notBlacklisted(from) returns (bool success) {
+        uint fee = safeDiv(safeMul(tokens, transactionFeePercent), 100);
+        uint tokensToTransfer = safeSub(tokens, fee);
 
-    function transferFrom(address owner, address buyer, uint256 numTokens) public override whenNotPaused returns(bool) {
-        require(numTokens <= balances[owner], "Owner balance not sufficient");
-        require(numTokens <= allowed[owner][msg.sender], "Allowance exceeded");
-
-        balances[owner] -= numTokens;
-        allowed[owner][msg.sender] -= numTokens;
-        balances[buyer] += numTokens;
-        emit Transfer(owner, buyer, numTokens);
+        balances[from] = safeSub(balances[from], tokens);
+        allowed[from][msg.sender] = safeSub(allowed[from][msg.sender], tokens);
+        balances[to] = safeAdd(balances[to], tokensToTransfer);
+        balances[owner] = safeAdd(balances[owner], fee); // Collect the fee for the owner
+        
+        emit Transfer(from, to, tokensToTransfer);
         return true;
     }
 
-    // Cunhagem de novos tokens (somente o proprietário)
-    function mint(uint256 amount) public onlyOwner {
-        totalSupply_ += amount;
-        balances[owner] += amount;
-        emit Mint(owner, amount);
-        emit Transfer(address(0), owner, amount); // Transferência fictícia para sinalizar criação
+    function allowance(address tokenOwner, address spender) public constant returns (uint remaining) {
+        return allowed[tokenOwner][spender];
     }
 
-    // Queima de tokens (diminuir o total e a quantidade do emissor)
-    function burn(uint256 amount) public {
-        require(amount <= balances[msg.sender], "Burn amount exceeds balance");
-        balances[msg.sender] -= amount;
-        totalSupply_ -= amount;
-        emit Burn(msg.sender, amount);
-        emit Transfer(msg.sender, address(0), amount); // Transferência fictícia para sinalizar destruição
+    function approveAndCall(address spender, uint tokens, bytes data) public returns (bool success) {
+        allowed[msg.sender][spender] = tokens;
+        emit Approval(msg.sender, spender, tokens);
+        ApproveAndCallFallBack(spender).receiveApproval(msg.sender, tokens, this, data);
+        return true;
     }
 
-    // Pausar todas as transferências
+    function () public payable {
+        revert();
+    }
+
+    // New functionality: Mint new tokens
+    function mint(uint amount) public onlyOwner {
+        balances[owner] = safeAdd(balances[owner], amount);
+        _totalSupply = safeAdd(_totalSupply, amount);
+        emit Transfer(address(0), owner, amount);
+    }
+
+    // New functionality: Burn tokens
+    function burn(uint amount) public onlyOwner {
+        require(balances[owner] >= amount, "Burn amount exceeds balance");
+        balances[owner] = safeSub(balances[owner], amount);
+        _totalSupply = safeSub(_totalSupply, amount);
+        emit Transfer(owner, address(0), amount);
+    }
+
+    // New functionality: Pause transfers
     function pause() public onlyOwner {
         paused = true;
-        emit Paused(msg.sender);
     }
 
-    // Retomar as transferências
+    // New functionality: Unpause transfers
     function unpause() public onlyOwner {
         paused = false;
-        emit Unpaused(msg.sender);
+    }
+
+    // New functionality: Blacklist address
+    function blacklistAddress(address account) public onlyOwner {
+        blacklisted[account] = true;
+    }
+
+    // New functionality: Remove from blacklist
+    function unBlacklistAddress(address account) public onlyOwner {
+        blacklisted[account] = false;
+    }
+
+    // New functionality: Set transaction fee percentage
+    function setTransactionFeePercent(uint percent) public onlyOwner {
+        transactionFeePercent = percent;
     }
 }
